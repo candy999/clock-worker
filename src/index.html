@@ -6,7 +6,7 @@
     <title>高精度決策時鐘 - 搶票戰術版</title>
     <style>
         :root { --bg: #121212; --text: #e0e0e0; --accent: #00e676; --alert: #ff1744; }
-        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: var(--bg); color: var(--text); display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; overflow: hidden; }
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: var(--bg); color: var(--text); display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; overflow: hidden; transition: background-color 0.2s; }
         .clock-container { text-align: center; margin-bottom: 20px; transition: transform 0.2s; }
         #clock { font-family: 'Courier New', Courier, monospace; font-size: 12vw; font-weight: bold; line-height: 1; margin: 0; letter-spacing: -2px; }
         #ms { font-size: 5vw; color: #888; }
@@ -19,14 +19,15 @@
         .tab.active { background: var(--accent); color: #000; }
         .ticket-settings { background: #1e1e1e; padding: 15px; border-radius: 12px; display: none; flex-direction: column; gap: 10px; }
         .ticket-settings.active { display: flex; }
-        input, button { padding: 10px; border-radius: 6px; border: none; font-size: 14px; width: 100%; box-sizing: border-box; }
-        input { background: #333; color: #fff; }
+        input[type="url"], input[type="time"], button { padding: 10px; border-radius: 6px; border: none; font-size: 14px; width: 100%; box-sizing: border-box; }
+        input[type="url"], input[type="time"] { background: #333; color: #fff; }
         button { background: #333; color: #fff; cursor: pointer; font-weight: bold; }
         button:hover { background: #444; }
         .btn-action { background: var(--accent); color: #000; margin-top: 5px;}
         .btn-action:hover { background: #00c853; }
         .status-dot { display: inline-block; width: 10px; height: 10px; background: #555; border-radius: 50%; margin-right: 8px; }
         .sync-active { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+        .checkbox-label { font-size: 13px; display: flex; align-items: center; gap: 6px; color: #ccc; cursor: pointer;}
     </style>
 </head>
 <body>
@@ -48,29 +49,30 @@
             <div class="tab" onclick="switchMode('ticket')">🎟️ 搶票戰鬥模式</div>
         </div>
 
-        <!-- 搶票設定面板 -->
         <div class="ticket-settings" id="ticket-panel">
             <input type="url" id="target-url" placeholder="輸入售票網址 (例如: https://tixcraft.com)" value="https://tixcraft.com">
             <input type="time" id="target-time" step="1" title="開賣時間">
-            <label style="font-size: 12px; display: flex; align-items: center; gap:5px;">
-                <input type="checkbox" id="auto-redirect" style="width:auto;"> 時間到自動跳轉 (修正延遲)
+            
+            <label class="checkbox-label">
+                <input type="checkbox" id="auto-redirect"> 倒數歸零自動跳轉 (修正延遲)
             </label>
+            <label class="checkbox-label">
+                <input type="checkbox" id="enable-sound"> 開啟最後10秒「滴答」音效 (預設關閉)
+            </label>
+
             <button class="btn-action" onclick="forceTicketSync()">🔄 強制同步該站時間</button>
             <button onclick="togglePiP()">📺 開啟畫中畫 (懸浮時鐘)</button>
         </div>
     </div>
 
     <script>
-        // 系統狀態
         let mode = 'standard';
-        let timeOffset = 0; // 毫秒
+        let timeOffset = 0;
         let rtt = 0;
         let renderDelay = 0;
-        let lastSync = 0;
         let audioCtx = null;
         let hasBeeped = false;
 
-        // DOM 元素
         const clockEl = document.getElementById('clock');
         const rttEl = document.getElementById('val-rtt');
         const offsetEl = document.getElementById('val-offset');
@@ -80,22 +82,37 @@
         const targetUrlInput = document.getElementById('target-url');
         const targetTimeInput = document.getElementById('target-time');
         const autoRedirect = document.getElementById('auto-redirect');
+        const enableSound = document.getElementById('enable-sound');
 
-        // 音效系統 (嗶聲)
+        // 修復並優化音效功能
         function playBeep(frequency, duration) {
-            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            const osc = audioCtx.createOscillator();
-            const gain = audioCtx.createGain();
-            osc.connect(gain);
-            gain.connect(audioCtx.destination);
-            osc.frequency.value = frequency;
-            osc.type = 'sine';
-            osc.start();
-            gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + duration);
-            osc.stop(audioCtx.currentTime + duration);
+            // 如果使用者沒有打勾，直接返回不發聲
+            if (!enableSound.checked) return;
+
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+
+                const osc = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain(); // 建立 GainNode
+                
+                osc.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                
+                osc.frequency.value = frequency;
+                osc.type = 'sine'; // 使用正弦波，聲音最柔和不刺耳
+
+                osc.start();
+                // 修復 TypeError：必須透過 gainNode.gain 來設定數值
+                gainNode.gain.setValueAtTime(1, audioCtx.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+                
+                osc.stop(audioCtx.currentTime + duration);
+            } catch (e) {
+                console.warn("音效播放失敗:", e);
+            }
         }
 
-        // 核心同步邏輯 (三階段校正)
         async function syncTime() {
             const t0 = performance.now();
             let serverTime = 0;
@@ -114,23 +131,24 @@
                     if(data.targetTime) {
                         serverTime = data.targetTime;
                     } else {
-                        throw new Error('伺服器無提供 Date 標頭');
+                        throw new Error('無 Date 標頭');
                     }
                 }
 
                 const t3 = performance.now();
                 const totalRTT = t3 - t0;
-                
-                // SNTP 偏移量公式：(伺服器時間 - 本機時間 + RTT/2)
                 const currentLocalTime = Date.now();
+                
                 timeOffset = (serverTime + (totalRTT / 2)) - currentLocalTime;
                 rtt = totalRTT.toFixed(1);
                 
-                // 更新 UI
                 rttEl.innerText = rtt + ' ms';
                 offsetEl.innerText = timeOffset.toFixed(1) + ' ms';
+                
                 if(mode === 'ticket') {
                     modeStatus.innerHTML = `<span class="status-dot sync-active" style="background:var(--alert);"></span>已鎖定售票站時間`;
+                } else {
+                    modeStatus.innerHTML = `<span class="status-dot sync-active"></span>標準對時模式`;
                 }
 
             } catch (err) {
@@ -139,11 +157,8 @@
             }
         }
 
-        // 時鐘渲染迴圈 (含渲染延遲補償與自動跳轉)
         function updateClock() {
             const tStart = performance.now();
-            
-            // 計算當下最精準的時間 = 本機時間 + 偏移量
             const preciseTime = new Date(Date.now() + timeOffset);
             
             const h = preciseTime.getHours().toString().padStart(2, '0');
@@ -153,7 +168,6 @@
 
             clockEl.innerHTML = `${h}:${m}:${s}<span id="ms">.${ms}</span>`;
 
-            // 戰鬥模式邏輯 (倒數音效與跳轉)
             if (mode === 'ticket' && targetTimeInput.value) {
                 const targetMatch = targetTimeInput.value.split(':');
                 if(targetMatch.length >= 2) {
@@ -166,38 +180,38 @@
                     
                     const timeDiff = tDate.getTime() - preciseTime.getTime();
 
-                    // 10秒倒數音效與變色
+                    // 10秒倒數視覺與音效邏輯 (修復不再卡住)
                     if (timeDiff > 0 && timeDiff <= 10000) {
-                        document.body.style.backgroundColor = '#3e1111'; // 暗紅警戒
+                        document.body.style.backgroundColor = '#2a0a0a'; // 倒數時呈現暗紅色背景
+                        
+                        // 每秒初(ms < 50)觸發一次音效
                         if (ms < 50 && !hasBeeped) {
-                            playBeep(timeDiff > 1000 ? 880 : 1760, 0.1); // 最後一秒高音
+                            // 最後一秒較高音 (880Hz)，其他較低音 (440Hz)
+                            playBeep(timeDiff > 1000 ? 440 : 880, 0.1); 
                             hasBeeped = true;
                         } else if (ms > 100) {
-                            hasBeeped = false;
+                            hasBeeped = false; // 重置旗標，準備下一次發聲
                         }
                     } else {
                         document.body.style.backgroundColor = 'var(--bg)';
                     }
 
-                    // 自動跳轉 (精準計算 RTT 提前量)
-                    // 如果網路延遲是 50ms，我們必須在 -25ms 時發起請求
+                    // 自動跳轉邏輯
                     const jumpOffset = (rtt / 2);
                     if (autoRedirect.checked && timeDiff > -1000 && timeDiff <= jumpOffset) {
                         window.open(targetUrlInput.value, '_blank');
-                        autoRedirect.checked = false; // 避免無限開啟
+                        autoRedirect.checked = false; 
                     }
                 }
             }
 
-            // 利用 rAF 取得下一幀繪製時間，計算渲染延遲
             requestAnimationFrame((tNext) => {
                 renderDelay = (tNext - tStart).toFixed(2);
                 renderEl.innerText = renderDelay + ' ms';
-                updateClock(); // 繼續迴圈
+                updateClock(); 
             });
         }
 
-        // UI 互動功能
         function switchMode(newMode) {
             mode = newMode;
             document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
@@ -205,26 +219,22 @@
             
             if(mode === 'standard') {
                 ticketPanel.classList.remove('active');
-                modeStatus.innerHTML = `<span class="status-dot sync-active"></span>標準對時模式`;
+                document.body.style.backgroundColor = 'var(--bg)';
             } else {
                 ticketPanel.classList.add('active');
-                modeStatus.innerHTML = `<span class="status-dot sync-active" style="background:var(--alert);"></span>搶票戰鬥模式`;
             }
-            syncTime(); // 切換模式立刻同步
+            syncTime(); 
         }
 
-        function forceTicketSync() {
-            syncTime();
-        }
+        function forceTicketSync() { syncTime(); }
 
-        // 畫中畫 API (PiP)
         async function togglePiP() {
             if (!('documentPictureInPicture' in window)) {
                 alert('您的瀏覽器不支援畫中畫功能 (請使用最新版 Chrome/Edge)');
                 return;
             }
             try {
-                const pipWindow = await documentPictureInPicture.requestWindow({ width: 300, height: 100 });
+                const pipWindow = await documentPictureInPicture.requestWindow({ width: 320, height: 120 });
                 const clone = document.getElementById('clock-container').cloneNode(true);
                 pipWindow.document.body.appendChild(clone);
                 pipWindow.document.body.style.background = '#121212';
@@ -232,12 +242,11 @@
                 pipWindow.document.body.style.display = 'flex';
                 pipWindow.document.body.style.alignItems = 'center';
                 pipWindow.document.body.style.justifyContent = 'center';
+                pipWindow.document.body.style.margin = '0';
                 
-                // 同步更新 PiP 視窗
                 setInterval(() => {
-                    const orig = document.getElementById('clock').innerHTML;
                     if(pipWindow.document.getElementById('clock')) {
-                        pipWindow.document.getElementById('clock').innerHTML = orig;
+                        pipWindow.document.getElementById('clock').innerHTML = clockEl.innerHTML;
                     }
                 }, 16);
             } catch (err) {
@@ -245,19 +254,10 @@
             }
         }
 
-        // 初始化
         syncTime();
-        // 背景輪詢：每 15 秒重新校正一次時間，防止石英震盪器飄移
         setInterval(syncTime, 15000); 
-        // 啟動高精度時鐘引擎
         requestAnimationFrame(updateClock);
         
-        // 要求音效權限的 Hack (點擊螢幕任意處解鎖 AudioContext)
-        document.body.addEventListener('click', () => {
-            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            if (audioCtx.state === 'suspended') audioCtx.resume();
-        }, { once: true });
-
     </script>
 </body>
 </html>
